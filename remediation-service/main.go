@@ -7,7 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"log"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -45,11 +47,37 @@ import (
 const tillernamespace = "kube-system"
 const remediationfilename = "remediation.yaml"
 const configurationserviceconnection = "CONFIGURATION_SERVICE" //"localhost:6060" // "configuration-service:8080"
+const datastoreserviceconnection = "KEPTNDATASTORE_SERVICE"
 const eventbroker = "EVENTBROKER"
 
 type envConfig struct {
 	Port int    `envconfig:"RCV_PORT" default:"8080"`
 	Path string `envconfig:"RCV_PATH" default:"/"`
+}
+
+type EvaluationDoneEvent struct {
+	Id           string                              `json:"id"`
+	KeptnContext string                              `json:"shkeptncontext"`
+	Data         keptnevents.EvaluationDoneEventData `json:"data"`
+}
+type EvaluationEvents struct {
+	Events      []EvaluationDoneEvent `json:"events"`
+	PageSize    int                   `json:"pageSize"`
+	TotalCount  int                   `json:"totalCount"`
+	NextPageKey int                   `json:"nextPageKey"`
+}
+
+type ConfigurationChangeEvent struct {
+	Id           string                                   `json:"id"`
+	KeptnContext string                                   `json:"shkeptncontext"`
+	Data         keptnevents.ConfigurationChangeEventData `json:"data"`
+}
+
+type ConfigurationChangeEvents struct {
+	Events      []ConfigurationChangeEvent `json:"events"`
+	PageSize    int                        `json:"pageSize"`
+	TotalCount  int                        `json:"totalCount"`
+	NextPageKey int                        `json:"nextPageKey"`
 }
 
 func main() {
@@ -115,22 +143,26 @@ func gotEvent(ctx context.Context, event cloudevents.Event) error {
 
 	resourceURI := remediationfilename
 
-	// valide if remediation should be performed
+	// validate if remediation should be performed
 	resourceHandler := keptnutils.NewResourceHandler(os.Getenv(configurationserviceconnection))
-	autoremediate := isRemediationEnabled(resourceHandler, projectname, stagename)
+	autoremediate, err := isRemediationEnabled(resourceHandler, projectname, stagename)
+	if err != nil {
+		logger.Error(fmt.Sprintf("could not determine if remediation is enabled: %s", err))
+		return err
+	}
 	logger.Debug(fmt.Sprintf("remediation enabled for project and stage: %t", autoremediate))
 
 	if !autoremediate {
 		return errors.New("remediation not enabled for project and stage")
 	}
 
-	// get remediation.yaml
+	// get remediation file
 	resource, err := resourceHandler.GetServiceResource(projectname, stagename, servicename, resourceURI)
 	if err != nil {
-		logger.Error("could not get remediation.yaml file")
+		logger.Error(fmt.Sprintf("could not get %s file", remediationfilename))
 		return err
 	}
-	logger.Debug("remediation.yaml for service found")
+	logger.Debug(fmt.Sprintf("%s file for service found", remediationfilename))
 
 	// get remediation action from remediation.yaml
 	var remediationData keptnmodels.Remediations
@@ -138,9 +170,10 @@ func gotEvent(ctx context.Context, event cloudevents.Event) error {
 
 	for _, remediation := range remediationData.Remediations {
 		if remediation.Name == eventData.ProblemTitle {
-			logger.Debug("Remediation for problem found in remediation.yaml")
+			logger.Debug(fmt.Sprintf("Remediation for problem found in %s", remediationfilename))
 			// currently only one remediation action is supported
 			if remediation.Actions[0].Action == "scaling" {
+				logger.Debug("remediation action is scaling")
 				currentReplicaCount, err := getReplicaCount(logger, projectname, stagename, servicename, os.Getenv(configurationserviceconnection))
 				if err != nil {
 					logger.Error("could not get replica count")
@@ -156,6 +189,65 @@ func gotEvent(ctx context.Context, event cloudevents.Event) error {
 				if err != nil {
 					logger.Error(err.Error())
 				}
+			} else if remediation.Actions[0].Action == "rollback" {
+				logger.Debug("remediation action is rollback")
+				// fetch latest deployments
+				url := os.Getenv(datastoreserviceconnection) + "/event?type=" + keptnevents.EvaluationDoneEventType + "&pageSize=100"
+				fmt.Println(url)
+				resp, err := http.Get(url)
+				if err != nil {
+					logger.Error(err.Error())
+					return err
+				}
+				defer resp.Body.Close()
+
+				if resp.StatusCode != http.StatusOK {
+					logger.Error("fetching latest evaluation-done events returned in non 200 return code")
+					return errors.New("fetching latest evaluation-done events returned in non 200 return code")
+				}
+
+				myevents := EvaluationEvents{}
+
+				body, err := ioutil.ReadAll(resp.Body)
+				if err != err {
+					logger.Error(err.Error())
+				}
+				err = json.Unmarshal(body, &myevents)
+				if err != nil {
+					logger.Error(err.Error())
+				}
+
+				// filter to only passed events
+				passedEvents := getEvaluationPassedEvents(logger, myevents, projectname, stagename, servicename)
+				// for _, pe := range passedEvents {
+				// 	fmt.Println(pe.KeptnContext)
+				// }
+				// fmt.Println(len(passedEvents))
+
+				// get keptncontext of previous passed deployment
+				keptnContextPassed := ""
+				if len(passedEvents) > 1 {
+					keptnContextPassed = passedEvents[1].KeptnContext
+				}
+				if keptnContextPassed == "" {
+					return errors.New("no deployment found to roll back to")
+				}
+				// get previous deployment event
+				previousDeploymentImage, err := getDeploymentByKeptnContext(logger, keptnContextPassed, projectname, stagename, servicename)
+				if err != nil {
+					logger.Error("could not fetch previous deployment")
+					return errors.New("could not fetch previous deployment")
+				}
+
+				// trigger rollback
+				logger.Debug("sending out configuration change event to rollback to " + previousDeploymentImage)
+				err = sendConfigurationChangeEvent(shkeptncontext, projectname, stagename, servicename, previousDeploymentImage)
+				if err != nil {
+					logger.Error(fmt.Sprintf("error when sending new configuration change event: %s", err))
+					return errors.New(fmt.Sprintf("error when sending new configuration change event: %s", err))
+				}
+			} else {
+				logger.Debug("no remediation action found.")
 			}
 
 		}
@@ -265,21 +357,20 @@ func getHelmClient() (*helm.Client, error) {
 
 }
 
-func isRemediationEnabled(rh *keptnutils.ResourceHandler, project string, stage string) bool {
+func isRemediationEnabled(rh *keptnutils.ResourceHandler, project string, stage string) (bool, error) {
 	keptnHandler := keptnutils.NewKeptnHandler(rh)
-	fmt.Println("get shipyard for ", project)
+	//fmt.Println("get shipyard for project", project)
 	shipyard, err := keptnHandler.GetShipyard(project)
 	if err != nil {
-		return false
+		return false, err
 	}
 	fmt.Println("shipyard: ", shipyard)
 	for _, s := range shipyard.Stages {
 		if s.Name == stage && s.RemediationStrategy == "automated" {
-			return true
+			return true, nil
 		}
 	}
-
-	return false
+	return false, nil
 }
 
 // gets Helm release name by pod name
@@ -462,4 +553,78 @@ func getServiceEndpoint(service string) (url.URL, error) {
 	}
 
 	return *url, nil
+}
+
+func getEvaluationPassedEvents(logger *keptnutils.Logger, myevents EvaluationEvents, projectname, stagename, servicename string) []EvaluationDoneEvent {
+	var passedEvents []EvaluationDoneEvent
+	logger.Debug("looking for evaluation passed events in last " + fmt.Sprint(len(myevents.Events)) + " events")
+	for _, e := range myevents.Events {
+		if e.Data.Project == projectname && e.Data.Stage == stagename && e.Data.Service == servicename && e.Data.EvaluationPassed {
+			passedEvents = append(passedEvents, e)
+		}
+	}
+	logger.Debug("found " + fmt.Sprint(len(passedEvents)) + " evaluation passed events")
+	return passedEvents
+}
+
+func getDeploymentByKeptnContext(logger *keptnutils.Logger, keptnContextPassed, projectname, stagename, servicename string) (string, error) {
+	resp, err := http.Get(os.Getenv(datastoreserviceconnection) + "/event?type=" + keptnevents.ConfigurationChangeEventType +
+		"&keptnContext=" + keptnContextPassed +
+		"&pageSize=100")
+	if err != nil {
+		logger.Error(err.Error())
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		logger.Error("fetching latest configuration change events returned in non 200 return code")
+		return "", errors.New("fetching latest configuration change events returned in non 200 return code")
+	}
+
+	myevents := ConfigurationChangeEvents{}
+
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != err {
+		logger.Error(err.Error())
+	}
+	err = json.Unmarshal(body, &myevents)
+	if err != nil {
+		logger.Error(err.Error())
+	}
+
+	prevDepl := myevents.Events[len(myevents.Events)-1].Data.ValuesCanary
+	previousDeploymentImage := prevDepl[0]["Value"] //myevents.Events[len(myevents.Events)-1].Data.ValuesCanary["image"]
+	return fmt.Sprintf("%v", previousDeploymentImage), nil
+}
+
+func sendConfigurationChangeEvent(shkeptncontext string, project string, stage string, service string, image string) error {
+
+	source, _ := url.Parse("remediation-service")
+	contentType := "application/json"
+
+	configurationChangeData := keptnevents.ConfigurationChangeEventData{}
+	configurationChangeData.Project = project
+	configurationChangeData.Stage = stage
+	configurationChangeData.Service = service
+	vc := map[string]interface{}{
+		"Key":   "image",
+		"Value": image,
+	}
+	vca := []map[string]interface{}{vc}
+	configurationChangeData.ValuesCanary = vca
+
+	event := cloudevents.Event{
+		Context: cloudevents.EventContextV02{
+			ID:          uuid.New().String(),
+			Time:        &types.Timestamp{Time: time.Now()},
+			Type:        "sh.keptn.events.tests-finished",
+			Source:      types.URLRef{URL: *source},
+			ContentType: &contentType,
+			Extensions:  map[string]interface{}{"shkeptncontext": shkeptncontext},
+		}.AsV02(),
+		Data: configurationChangeData,
+	}
+
+	return sendEvent(event)
 }
