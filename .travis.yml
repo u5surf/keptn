@@ -157,12 +157,20 @@ jobs:
 
 
   - stage: Cron GKE Full (--platform=gke)
-    if: branch = master AND type = cron
+    #if: branch = master AND type = cron
+    include:
+      - GKE_VERSION=1.14
+      - GKE_VERSION=1.15
+      - GKE_VERSION=1.16
     env: KEPTN_INSTALLATION_TYPE=FULL
     <<: *gke_full # use template
 
   - stage: Cron GKE Full with Istio (--platform=gke --istio-install-option=Reuse)
-    if: branch = master AND type = cron
+    #if: branch = master AND type = cron
+    include:
+      - GKE_VERSION=1.14
+      - GKE_VERSION=1.15
+      - GKE_VERSION=1.16
     env: KEPTN_INSTALLATION_TYPE=REUSE-ISTIO
     <<: *gke_full # use template
 
@@ -192,7 +200,7 @@ jobs:
       - cat ~/.keptn/keptn-installer-err.log
 
   - stage: Cron MicroK8s Standalone (--platform=kubernetes --use-case=quality-gates)
-    if: branch = master AND type = cron
+    if: branch = master AND (type = cron OR type = push)
     os: linux
     before_script:
       # download and install kubectl
@@ -216,7 +224,7 @@ jobs:
       - cat ~/.keptn/keptn-installer-err.log
 
   - stage: Cron Minikube Standalone (--platform=kubernetes --use-case=quality-gates)
-    if: branch = master AND type = cron
+    if: branch = master AND (type = cron OR type = push)
     os: linux
     before_script:
       # download and install kubectl
