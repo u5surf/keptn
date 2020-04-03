@@ -103,9 +103,7 @@ gke_full: &gke_full
     - test/utils/gke_delete_cluster.sh
   after_failure:
     # print some debug info
-    - echo "Keptn Installation Log:"
     - cat ~/.keptn/keptn-installer.log
-    - cat ~/.keptn/keptn-installer-err.log
     - kubectl get events --sort-by='.lastTimestamp' --all-namespaces
     - kubectl get pods --all-namespaces
     - kubectl get services --all-namespaces
@@ -241,7 +239,7 @@ jobs:
     <<: *gke_full # use template
 
   - stage: Test Minishift Standalone (--platform=openshift --use-case=quality-gates)
-    if: branch = master AND (type = cron OR type = push) # run for any change on master and cron
+    # if: branch = master AND (type = cron OR type = push) # run for any change on master and cron
     os: linux
     before_script:
       # download and install kubectl
@@ -261,16 +259,14 @@ jobs:
       - echo "Tests were successful, cleaning up the cluster now..."
     after_failure:
       # print some debug info
-      - echo "Keptn Installation Log:"
       - cat ~/.keptn/keptn-installer.log
-      - cat ~/.keptn/keptn-installer-err.log
-      - kubectl get events --sort-by='.lastTimestamp' --all-namespaces
       - kubectl get pods --all-namespaces
       - kubectl get services --all-namespaces
       - kubectl get ingress --all-namespaces
+      - kubectl get events --sort-by='.lastTimestamp' --all-namespaces
 
   - stage: Test MicroK8s Standalone (--platform=kubernetes --use-case=quality-gates)
-    if: branch = master AND (type = cron OR type = push) # run for any change on master and cron
+    # if: branch = master AND (type = cron OR type = push) # run for any change on master and cron
     os: linux
     before_script:
       # download and install kubectl
@@ -289,16 +285,14 @@ jobs:
       - echo "Tests were successful, cleaning up the cluster now..."
     after_failure:
       # print some debug info
-      - echo "Keptn Installation Log:"
       - cat ~/.keptn/keptn-installer.log
-      - cat ~/.keptn/keptn-installer-err.log
-      - kubectl get events --sort-by='.lastTimestamp' --all-namespaces
       - kubectl get pods --all-namespaces
       - kubectl get services --all-namespaces
       - kubectl get ingress --all-namespaces
+      - kubectl get events --sort-by='.lastTimestamp' --all-namespaces
 
   - stage: Test Minikube Standalone (--platform=kubernetes --use-case=quality-gates)
-    if: branch = master AND (type = cron OR type = push) # run for any change on master and cron
+    # if: branch = master AND (type = cron OR type = push) # run for any change on master and cron
     os: linux
     before_script:
       # download and install kubectl
@@ -317,13 +311,11 @@ jobs:
       - echo "Tests were successful, cleaning up the cluster now..."
     after_failure:
       # print some debug info
-      - echo "Keptn Installation Log:"
       - cat ~/.keptn/keptn-installer.log
-      - cat ~/.keptn/keptn-installer-err.log
-      - kubectl get events --sort-by='.lastTimestamp' --all-namespaces
       - kubectl get pods --all-namespaces
       - kubectl get services --all-namespaces
       - kubectl get ingress --all-namespaces
+      - kubectl get events --sort-by='.lastTimestamp' --all-namespaces
 
   ##################################################################################
   # feature/bug/hotfix/patch branches build jobs
